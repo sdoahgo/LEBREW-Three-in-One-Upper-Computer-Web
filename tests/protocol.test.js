@@ -1,0 +1,20 @@
+import{image}from'./fixture.js';
+import test from'node:test';import assert from'node:assert/strict';import{readFile}from'node:fs/promises';
+import{CMD,crc32,frame,Parser,Reassembler,fragments,concat,encoder,decoder,validatePoints,validateFirmware,nativeCommand,generateSN}from'../fusion_protocol.js';
+test('CRC32 standard vector and incremental prefix match ESP ROM API',()=>{const b=encoder.encode('123456789');assert.equal(crc32(b),0xcbf43926);assert.equal(crc32(b.subarray(4),crc32(b.subarray(0,4))),0xcbf43926);});
+test('framing is byte-order stable against independent Python zlib golden packet',()=>{assert.equal(Buffer.from(frame(1,0x1234)).toString('hex'),'f55f0101341200005e4315270d0a');});
+test('all byte stream cuts, multiple frames, console noise and large payload',()=>{const bytes=new Uint8Array(3000).fill(0x35);bytes.set([0xf5,0x5f,1,1,0,0,0xff,0xff],15);const a=frame(0x81,7,bytes),b=frame(0x82,8,encoder.encode('{"ok":true}'));for(let cut=0;cut<=a.length;cut+=13){const out=[],p=new Parser(f=>out.push(f));p.push(encoder.encode('ESP-ROM boot console\r\n'));p.push(a.subarray(0,cut));p.push(concat(a.subarray(cut),b));assert.equal(out.length,2);assert.deepEqual(out[0].payload,bytes);assert.equal(out[1].seq,8);}});
+test('CRC and trailer failures recover the next packet',()=>{for(const index of[3,9,16,17]){const bad=frame(1,1,Uint8Array.of(1,2,3,4));bad[index]^=1;const out=[],p=new Parser(f=>out.push(f));p.push(concat(bad,frame(2,2)));assert.equal(out.length,1);assert.equal(out[0].seq,2);}});
+test('BLE reassembles small MTU, sequence wrap, dropped and restarted frame',()=>{for(const size of[20,240]){const b=frame(0x11,5,new Uint8Array(4000).fill(0x7f)),out=[],r=new Reassembler(x=>out.push(x)),parts=fragments(b,size);parts.forEach(p=>r.push(p));assert.deepEqual(out[0],b);out.length=0;r.push(parts[0]);r.push(parts[2]);assert.equal(out.length,0);parts.forEach(p=>r.push(p));assert.deepEqual(out[0],b);}});
+test('synthetic SCAsave imports exact first nine points and wire field spellings',async()=>{const p=JSON.parse(await readFile(new URL('./fixtures/scasave-example.json',import.meta.url))),o=validatePoints(p);assert.equal(o.SCA_Piont.SCA_Parameter_points,9);assert.deepEqual(o.SCA_Piont.SCA_Been_Point,p.sca_been.slice(0,9).map(Number));assert.equal(o.SCA_Piont.SCA_Y_Point[0],8.51);});
+test('point validation preserves repeated and unordered raw values while rejecting incomplete or invalid numbers',()=>{const p={sca_point_count:3,sca_been:[3,1,1],sca_powder:[8,8,2],sca_values:[8,9,10]};const q=validatePoints(p).SCA_Piont;assert.deepEqual(q.SCA_Been_Point,p.sca_been);assert.deepEqual(q.SCA_Pink_Point,p.sca_powder);assert.deepEqual(q.SCA_Y_Point,p.sca_values);for(const invalid of[{...p,sca_point_count:1},{...p,sca_been:[1,2]},{...p,sca_values:['',9,10]},{...p,sca_powder:[3,Infinity,4]}])assert.throws(()=>validatePoints(invalid));});
+test('native compensation remains IEEE float32 big endian',()=>{const b=nativeCommand(17,12.5);assert.equal(b.length,21);assert.equal(Buffer.from(b.subarray(17)).toString('hex'),'41480000');assert.throws(()=>nativeCommand(8,101));assert.throws(()=>nativeCommand(9,256));assert.throws(()=>nativeCommand(18,NaN));});
+test('screen settings send only the exact tiers supported by the device UI',()=>{
+  for(const [op,values]of [[8,[5,25,50]],[9,[1,5,10]]]){
+    for(const value of values){const b=nativeCommand(op,value);assert.equal(b.length,18);assert.equal(b[16],op);assert.equal(b[17],value);}
+    for(const value of [undefined,'',0,2,20,80,100,255,-1,1.5,NaN])if(!values.includes(value))assert.throws(()=>nativeCommand(op,value));
+  }
+});
+test('firmware preflight rejects chip mismatch, merged images and bootloaders',()=>{const b=image();assert.equal(validateFirmware(b).size,b.length);for(const mutate of[b=>b[0]=0,b=>b[12]=5,b=>b[32]=0]){const c=b.slice();mutate(c);assert.throws(()=>validateFirmware(c));}});
+
+test('SN preserves original Qt LB date random8 RF format',()=>{assert.equal(generateSN(new Date(2026,9,23),()=>new Uint32Array(8)), 'LB26102300000000RF');assert.equal(generateSN(new Date(2026,0,2),()=>new Uint32Array(8).fill(0xffffffff)), 'LB260102ZZZZZZZZRF');});

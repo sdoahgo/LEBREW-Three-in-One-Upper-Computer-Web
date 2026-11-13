@@ -1,0 +1,7 @@
+__pycache__/
+backups/
+diagnostics/
+firmware/
+node_modules/
+*.log
+SCAsave.txt
